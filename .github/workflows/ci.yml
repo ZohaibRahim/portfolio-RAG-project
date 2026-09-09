@@ -19,7 +19,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: backend/package-lock.json
 
@@ -32,6 +32,11 @@ jobs:
       - name: Typecheck backend
         working-directory: backend
         run: npx tsc --noEmit
+
+      # Verify that the actual production build succeeds.
+      - name: Build backend
+        working-directory: backend
+        run: npm run build
 
   frontend:
     name: Frontend checks
@@ -46,7 +51,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -64,3 +69,47 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         run: npm run build
+
+  deploy:
+    name: Deploy backend to Azure
+    runs-on: ubuntu-latest
+
+    # Deployment only starts after BOTH CI jobs succeed.
+    needs:
+      - backend
+      - frontend
+
+    # Never deploy pull requests or non-main branches.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      # Download the repository again because each job
+      # runs on its own clean GitHub Actions machine.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Use the same Node version as Azure App Service.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      # Install dependencies so we can create the compiled dist/ directory.
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      # Compile src/*.ts into production JavaScript under dist/.
+      - name: Build backend
+        working-directory: backend
+        run: npm run build
+
+      # Deploy ONLY the backend folder to Azure App Service.
+      - name: Deploy backend
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: zohaib-portfolio-rag
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
+          package: ./backend
