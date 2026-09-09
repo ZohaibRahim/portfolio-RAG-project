@@ -74,21 +74,20 @@ jobs:
     name: Deploy backend to Azure
     runs-on: ubuntu-latest
 
-    # Deployment only starts after BOTH CI jobs succeed.
+    # Wait until both CI jobs succeed.
     needs:
       - backend
       - frontend
-
-    # Never deploy pull requests or non-main branches.
+    
+    # Deploy only pushes to main.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
-      # Download the repository again because each job
-      # runs on its own clean GitHub Actions machine.
+      # Download the repository.
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Use the same Node version as Azure App Service.
+      # Use the same Node.js version as Azure App Service.
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -96,19 +95,33 @@ jobs:
           cache: npm
           cache-dependency-path: backend/package-lock.json
 
-      # Install dependencies so we can create the compiled dist/ directory.
+      # Install dependencies needed to compile TypeScript.
       - name: Install backend dependencies
         working-directory: backend
         run: npm ci
 
-      # Compile src/*.ts into production JavaScript under dist/.
+      # Compile TypeScript into dist/.
       - name: Build backend
         working-directory: backend
         run: npm run build
 
-      # Deploy ONLY the backend folder to Azure App Service.
+      # Create a deployment ZIP containing the CONTENTS
+      # of backend/, not the backend/ directory itself.
+      #
+      # This ensures package.json is at the root of the ZIP
+      # so Azure Oryx can detect the Node.js application.
+      - name: Create backend deployment package
+        working-directory: backend
+        run: |
+          zip -r ../backend-deploy.zip . \
+            -x "node_modules/*" \
+            -x ".env" \
+            -x ".env.*"
+
+      # Deploy the ZIP package to Azure App Service.
       - name: Deploy backend
         uses: azure/webapps-deploy@v3
         with:
           app-name: zohaib-portfolio-rag
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
+          package: ./backend-deploy.zip
