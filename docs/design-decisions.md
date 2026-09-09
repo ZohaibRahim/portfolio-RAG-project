@@ -345,6 +345,85 @@ V1 deployment.
 
 ---
 
+## Cross-provider validation: Azure smoke test
+
+**Decision.** Before deploying, run the full 30-question regression
+suite against the production provider stack once to confirm the
+pipeline still works end-to-end on Azure after the reranker + rewrite
+changes made against Ollama. Keep the run bounded so it doesn't burn
+credit unnecessarily.
+
+**Setup.** `.env` temporarily flipped to:
+
+```
+AI_PROVIDER=azure
+AZURE_SEARCH_INDEX_NAME=portfolio-chunks
+```
+
+Everything else — reranker contract, meta filter, pool size 15, rewrite
+off — unchanged.
+
+**Result — 30-question regression, 2026-09-09.**
+
+| Metric | Ollama (dev) | Azure (prod) |
+|---|:-:|:-:|
+| Hard passes | 30 / 30 | 30 / 30 |
+| Soft failures | 1 | 3 |
+| Unsupported → 0 chunks | 4 / 4 | 4 / 4 |
+| Pipeline errors (dimension mismatch, token limit, citation) | 0 | 0 |
+
+Pipeline works end-to-end on production without a single code change.
+The Azure soft-failure count is higher purely because the two providers
+disagree on which identity-related chunk ranks highest.
+
+**The three soft failures.** All in the IDENTITY category:
+`Who is Zohaib?`, `Tell me about Zohaib.`, `What is Zohaib's
+background?`. In each case, the `resume | About Zohaib` chunk (which
+Ollama consistently ranks #1) falls off the top-5 with the Azure
+embedding model. What replaces it in the top-5 is the
+`resume | Zohaib Rahim — Master Resume` heading chunk and the
+`portfolio-website | Zohaib Rahim — Portfolio Site` overview chunk —
+both of which contain identity framing under different section
+headings.
+
+Answer correctness is unaffected: the replacement chunks contain the
+biographical content needed to answer the question. The soft-failure
+signal is a *retrieval-precision* indicator ("the specific chunk we
+expected is missing"), not an *answer-correctness* indicator.
+
+**Why the divergence.** Different embedding models produce different
+semantic neighborhoods:
+
+- `qwen3-embedding:0.6b` (1024-dim, dev) weights the body chunk
+  titled "About Zohaib" highest for identity queries.
+- `text-embedding-3-small` (1536-dim, prod) weights chunks whose
+  headings contain the literal name ("Zohaib Rahim — Master Resume",
+  "Zohaib Rahim — Portfolio Site") higher than a body chunk titled
+  "About Zohaib".
+
+Both are defensible rankings. Neither is a bug in the pipeline.
+
+**Other observed differences.**
+
+- Azure reranker returns slightly more chunks per question on average.
+  GPT-5-mini's rerank judgement is more nuanced than Qwen 4B's; it
+  keeps more borderline candidates as "relevant" rather than
+  aggressively pruning to 1-2. Adds a small number of extra tokens to
+  the answer prompt without changing correctness on this suite.
+- All metric, attribution, misspelling, and unsupported questions
+  produced identical outcomes on both providers.
+
+**Verdict.** Ship. The 3 soft failures do not warrant blocking
+deployment — the assistant's answers to identity questions remain
+grounded in real biographical chunks. Track the metric across future
+runs so a genuine regression can be distinguished from cross-provider
+ranking drift.
+
+**`.env` flipped back to Ollama immediately after the run to stop
+consuming Azure credit during development.**
+
+---
+
 ## Deliberately non-decisions
 
 Choices made without formal evaluation because either the alternative
