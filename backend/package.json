@@ -1,0 +1,40 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "test:chunks": "tsx src/scripts/testChunking.ts",
+    "test:knowledge": "tsx src/scripts/testKnowledge.ts",
+    "test:embedding": "tsx src/scripts/testEmbedding.ts",
+    "test:search-upload": "tsx src/scripts/testSearchUpload.ts",
+    "test:retrieval": "tsx src/scripts/testRetrieval.ts",
+    "test:context": "tsx src/scripts/testContext.ts",
+    "ingest": "tsx src/scripts/ingestKnowledge.ts",
+    "test:rag": "tsx src/scripts/testRag.ts",
+    "test:citations": "tsx src/scripts/testCitationValidation.ts",
+    "test:regression": "tsx src/scripts/testRegression.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.4.0",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@azure/search-documents": "^13.0.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.3.0",
+    "openai": "^7.8.0"
+  }
+}
