@@ -112,4 +112,3 @@ jobs:
         with:
           app-name: zohaib-portfolio-rag
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
-          package: ./backend
