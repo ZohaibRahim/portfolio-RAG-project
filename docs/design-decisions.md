@@ -236,19 +236,45 @@ the visible answer.
 ## Query-rewrite feature flag
 
 **Decision.** The LLM query-rewrite stage is togglable via the
-`QUERY_REWRITE_ENABLED` env var. Default is `true` (behaviour
-preserved). Setting it to `false` bypasses the rewrite call and sends
-the trimmed original question directly to Azure Search.
+`QUERY_REWRITE_ENABLED` env var. **Default is now `false`** — the
+regression evidence (below) showed the rewrite call was not paying for
+itself. Setting the flag back to `true` re-enables the rewrite without
+a code change.
 
 **Why a flag rather than delete.** The rewrite step is one of three
 LLM calls per question and one full network round-trip. Its actual
-contribution to retrieval quality is measurable only by running the
-regression suite with it disabled. A flag lets us:
+contribution to retrieval quality is only measurable by running the
+regression suite with it disabled. Keeping the flag lets us:
 
-- Compare pipeline output with rewrite on vs off without touching code
-- Ship whichever wins production without a deploy
-- Reintroduce it later if the disabled state regresses on any question
-  category we care about
+- Re-test after any knowledge-base expansion without a deploy
+- Roll back to the rewrite path if a later regression starts depending
+  on it
+- Compare pipeline output with rewrite on vs off from a single `.env`
+  edit
+
+**Evidence — 30-question regression, 2026-09-09.**
+
+| Metric | Rewrite ON | Rewrite OFF |
+|---|:-:|:-:|
+| Hard passes | 30 / 30 | 30 / 30 |
+| Soft failures | 1 (PHAS typo — no expected evidence to find) | 1 (same case) |
+| Top-1 evidence correct | matched in 27 / 30; minor top-1 shuffles on 3 | matched in 27 / 30; minor top-1 shuffles on 3 |
+| Credit Card Fraud question | 5 chunks in top-5, 4 unrelated jailbreak chunks padded in | **1 clean chunk** — reranker had a shorter query and rejected more noise |
+
+The three shuffled cases (`Python` skill, `Python security log
+analyzer`, `What kind of work does Zohaib do?`) still passed and the
+correct evidence appeared in the top 3 either way; the reordering was
+between roughly equivalent chunks (e.g. `resume | About Zohaib` vs
+`enterprise-llm-jailbreak-detection | Technology Stack` for the Python
+skill question).
+
+**Tradeoff being accepted.** One fewer LLM call per question (~500
+tokens of rewrite input at GPT-5-mini pricing, ≈ $0.0001 saved per
+question) and one full network round-trip removed → measurably lower
+p50 latency in the answer path. Precision was **unchanged or slightly
+better** on this suite; the risk we're accepting is that a future
+knowledge-base expansion introduces question shapes where the rewrite
+matters, which the flag lets us verify without redeploying.
 
 ---
 

@@ -12,6 +12,31 @@ current state and what specifically remains.
 
 ---
 
+## Post-snapshot updates
+
+Newest first. Each entry links to the commit that landed the change.
+
+- **2026-09-09 — Query rewrite disabled by default.** Ran the
+  30-question regression suite with `QUERY_REWRITE_ENABLED` both `true`
+  and `false`. Both configurations produced 30/30 hard passes and 1
+  identical soft failure. Rewrite OFF was strictly cleaner on the
+  Credit Card Fraud question (1 clean chunk vs 5 with 4 unrelated
+  jailbreak candidates padded in) and equivalent everywhere else.
+  Default flipped to `false` in `.env.example`; the flag is retained
+  in code for reversibility. Design doc updated with the evidence
+  table. See `docs/design-decisions.md` → "Query-rewrite feature flag".
+- **2026-09-09 — CI added.** `.github/workflows/ci.yml` runs backend
+  typecheck plus frontend lint + build on every push and PR. Fixed one
+  follow-up TS error (`FormEvent` needed a type-only import under
+  `verbatimModuleSyntax`). Commits `a82cd0f` and `a318e8f`.
+- **2026-09-09 — README + architecture diagrams written.** Root
+  `README.md` covers the full plan (what/why/architecture/retrieval
+  pipeline/provider split/security/setup/limitations) with two Mermaid
+  diagrams (request pipeline and deployment topology). Commit
+  `5774a4a`.
+
+---
+
 ## Legend
 
 - **Done** — implemented, verified, and referenced in the codebase.
