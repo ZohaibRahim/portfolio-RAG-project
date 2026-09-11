@@ -5,7 +5,10 @@ import express, {
 } from "express";
 import cors from "cors";
 import helmet from "helmet";
-import rateLimit from "express-rate-limit";
+import {
+  ipKeyGenerator,
+  rateLimit,
+} from "express-rate-limit";
 
 import { env } from "./config/env.js";
 import { answerQuestion } from "./services/ragService.js";
@@ -97,6 +100,67 @@ app.get("/api/health", (_req, res) => {
 });
 
 /**
+ * Build a stable rate-limit key from the client IP.
+ *
+ * Azure App Service may expose IPv4 client addresses
+ * through Express as:
+ *
+ *   203.0.113.10:54321
+ *
+ * The source port changes between connections, so it must
+ * not be part of the rate-limit identity.
+ *
+ * After removing an Azure-added port, ipKeyGenerator()
+ * handles IPv4 normally and applies appropriate subnet
+ * handling for IPv6 clients.
+ */
+function getRateLimitKey(req: Request): string {
+  const rawIp =
+    req.ip ??
+    req.socket.remoteAddress ??
+    "unknown";
+
+  let normalizedIp = rawIp;
+
+  /**
+   * Azure commonly supplies IPv4 addresses with a source
+   * port, for example:
+   *
+   *   50.69.228.123:51855
+   *
+   * Remove only the port portion.
+   */
+  const ipv4WithPort =
+    normalizedIp.match(
+      /^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/
+    );
+
+  if (ipv4WithPort) {
+    normalizedIp = ipv4WithPort[1];
+  }
+
+  /**
+   * Also support bracketed IPv6 with a port:
+   *
+   *   [2001:db8::1]:54321
+   *
+   * Normal IPv6 addresses without a port are left intact.
+   */
+  const ipv6WithPort =
+    normalizedIp.match(
+      /^\[([0-9a-fA-F:]+)\]:\d+$/
+    );
+
+  if (ipv6WithPort) {
+    normalizedIp = ipv6WithPort[1];
+  }
+
+  return ipKeyGenerator(
+    normalizedIp
+  );
+}
+
+/**
  * Rate limiter for /api/ask only.
  *
  * We deliberately do not rate-limit /api/health so external
@@ -105,6 +169,14 @@ app.get("/api/health", (_req, res) => {
 const askLimiter = rateLimit({
   windowMs: 60 * 1000,
   limit: ASK_RATE_LIMIT_PER_MINUTE,
+
+  /**
+   * Azure's proxy may append a source port to req.ip.
+   * Normalize it before using the IP as the rate-limit key.
+   */
+  keyGenerator: (req) =>
+    getRateLimitKey(req),
+
   standardHeaders: "draft-7",
   legacyHeaders: false,
 
