@@ -11,36 +11,30 @@ import { env } from "./config/env.js";
 import { answerQuestion } from "./services/ragService.js";
 
 /**
- * Maximum allowed length for a portfolio question after
- * whitespace trimming.
+ * Create the Express application.
+ */
+const app = express();
+
+/**
+ * Azure App Service sits behind a reverse proxy.
  *
- * 500 characters comfortably fits any realistic question
- * while making it more expensive for a bad actor to spam
- * long, token-heavy requests through /api/ask.
+ * Trust one proxy hop so Express can use the forwarded
+ * client IP for rate limiting.
+ */
+app.set("trust proxy", 1);
+
+/**
+ * Maximum allowed question length.
  */
 const MAX_QUESTION_LENGTH = 500;
 
 /**
- * Number of /api/ask requests allowed per IP per minute.
- *
- * Small enough to blunt basic abuse but well above what a
- * real portfolio visitor would ever need. The rate limiter
- * uses express-rate-limit's default in-memory store which
- * is fine for the single-instance V1 deployment; a shared
- * store (Redis, API gateway) would be required if the
- * backend is ever scaled horizontally.
+ * Maximum /api/ask requests allowed per IP per minute.
  */
 const ASK_RATE_LIMIT_PER_MINUTE = 20;
 
-// Create the Express application.
-const app = express();
-
 /**
- * Do not advertise Express as the server framework via the
- * default X-Powered-By response header. Helmet already
- * removes this header, but disabling it explicitly makes
- * the intent obvious and does not rely on helmet's future
- * defaults.
+ * Do not expose Express through X-Powered-By.
  */
 app.disable("x-powered-by");
 
