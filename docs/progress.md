@@ -16,6 +16,34 @@ current state and what specifically remains.
 
 Newest first. Each entry links to the commit that landed the change.
 
+- **2026-09-12 — V1 shipped.** Backend and frontend deployed through the
+  normal CI pipeline (commits `55cb8c6` code + `a26cb46` docs → GitHub
+  Actions: backend checks, frontend checks, Azure App Service deploy —
+  all green). Frontend tab title also fixed from the default `frontend`
+  to `Zohaib Rahim — Portfolio Assistant` in `frontend/index.html`.
+
+  **Production smoke test** (7 questions against the deployed Azure
+  backend at `zohaib-portfolio-rag-adfkamgfbtanaxez.northcentralus-01.azurewebsites.net`):
+  - `Who is Zohaib?` → PASS, 5 sources including catalogue [4]
+  - `What projects has Zohaib done?` → **PASS, all 16 projects across
+    6 categories enumerated**, catalogue cited
+  - `What is Roshtai?` → PASS, 5 Roshtay chunks (typo tolerance held
+    in production)
+  - `Has Zohaib worked with React?` → variance-case fallback (1/5
+    expected; accepted per plan)
+  - `What did Zohaib do at PHSA?` → PASS, all metrics grounded
+  - LLM jailbreak contribution → PASS, correctly separates individual
+    vs team outcomes
+  - `Zohaib's favorite movie?` → **exact** unsupported fallback string
+  Latencies 1.7-8.1s per question. Health endpoint ~12.7s on cold
+  start, sub-second thereafter. No malformed responses, no rerank
+  fallback warnings, no application exceptions surfaced through the
+  API.
+
+  **RAG architecture is frozen.** No further retrieval, reranker, or
+  catalogue changes without a specific new reason. Future work moves
+  to product/UX/observability layers instead.
+
 - **2026-09-12 — Projects Catalogue ingested into `portfolio-chunks`.**
   Ran `npm run ingest` against production after the working-tree diff
   was approved. 130 documents in the index (129 source chunks +
