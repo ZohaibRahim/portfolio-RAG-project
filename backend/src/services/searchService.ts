@@ -134,6 +134,47 @@ export async function getSearchDocument(
 }
 
 /**
+ * Delete every document in the index whose `sourceType` equals
+ * the given value. Used by the ingestion script to clear stale
+ * catalogue documents before re-uploading, so a future shape
+ * change (or per-category split) cannot leave orphan entries.
+ *
+ * Returns the number of documents deleted.
+ */
+export async function deleteDocumentsBySourceType(
+  sourceType: string
+): Promise<number> {
+  const escaped = sourceType.replace(/'/g, "''");
+
+  const response = await searchClient.search(
+    "*",
+    {
+      filter: `sourceType eq '${escaped}'`,
+      select: ["id"],
+      top: 1000,
+    }
+  );
+
+  const idsToDelete: string[] = [];
+
+  for await (const result of response.results) {
+    idsToDelete.push(
+      (result.document as { id: string }).id
+    );
+  }
+
+  if (idsToDelete.length === 0) {
+    return 0;
+  }
+
+  // Use the key-name / key-values overload so we don't have to
+  // fabricate full PortfolioSearchDocument objects for delete.
+  await searchClient.deleteDocuments("id", idsToDelete);
+
+  return idsToDelete.length;
+}
+
+/**
  * Run pure vector retrieval.
  *
  * We keep this mainly for testing and comparison.

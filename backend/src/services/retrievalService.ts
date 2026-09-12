@@ -14,147 +14,152 @@ import {
 } from "./searchService.js";
 
 /**
- * Number of candidate chunks pulled from Azure AI Search
- * in the first retrieval stage.
- *
- * We deliberately over-fetch here. Azure's hybrid ranking
- * is strong on recall but only moderate on fine-grained
- * relevance ordering, so grabbing a broader pool gives the
- * LLM reranker enough material to promote the truly best
- * chunks even when Azure ranks them mid-list.
- *
- * The rerankService pre-filter typically drops ~5 meta
- * chunks from this pool before the LLM sees them, so 15
- * here corresponds to roughly 10 chunks reaching the LLM.
- *
- * Empirically 15 is the sweet spot: pool sizes of 12 and
- * 10 still passed the regression suite's hard checks, but
- * introduced visible precision loss — most notably the
- * "My Contribution" chunk falling out of the top 5 on the
- * jailbreak F1 question, and unrelated project chunks
- * being padded into Gradified / Roshtay answers.
+ * Candidate pool size for the recall stage of retrieval.
+ * See docs/design-decisions.md for the sweep (20 / 15 / 12 / 10)
+ * that landed on 15.
  */
 const CANDIDATE_POOL_SIZE = 15;
 
 /**
- * Number of chunks the reranker keeps as the final
- * grounding context for answer generation.
- *
- * Kept small so the answer model stays focused and so
- * citation labels ([1]..[5]) remain readable in the UI.
+ * Number of chunks the reranker keeps as the final grounding
+ * context for answer generation. Small so the answer stays
+ * focused and citations [1]..[5] remain readable in the UI.
  */
 const FINAL_TOP_K = 5;
 
 /**
- * Retrieve the most relevant portfolio context
- * for a natural-language question.
+ * Approximate per-chunk overhead added by the surrounding
+ * label block ("[N]\nSource: ...\nSection: ...\nContent:\n").
+ * Used only by the telemetry estimate below.
+ */
+const CONTEXT_LABEL_OVERHEAD_CHARS = 40;
+
+/**
+ * Approximate per-candidate character cost of the rerank
+ * prompt after RERANK_MAX_WORDS truncation (~150 words +
+ * label overhead). Used only by the telemetry estimate.
+ */
+const RERANK_PROMPT_CHARS_PER_CANDIDATE = 1000;
+
+/**
+ * Retrieval telemetry emitted by retrieveContextWithTelemetry.
+ * Intended for the regression harness; production callers use
+ * retrieveContext() and do not pay any telemetry cost.
+ */
+export interface RetrievalTelemetry {
+  poolRequested: number;
+  poolReturned: number;
+  rerankTopN: number;
+  rerankReturned: number;
+  finalCount: number;
+  approxRerankPromptChars: number;
+  approxFinalContextChars: number;
+}
+
+/**
+ * Retrieve the most relevant portfolio context for a
+ * natural-language question.
  *
- * This service coordinates a two-stage retrieval pipeline:
+ * Pipeline:
+ *   1. optional LLM query rewrite (env-gated, default off)
+ *   2. embed the original question
+ *   3. Azure AI Search hybrid retrieval, top 15
+ *   4. LLM reranker prunes to `topK` (default 5)
  *
- * 1. LLM query rewriting
- * 2. semantic embedding generation
- * 3. provider-specific dimension validation
- * 4. Azure AI Search hybrid retrieval (recall-heavy top ~20)
- * 5. LLM reranking (precision-heavy top 5)
+ * The Projects Catalogue chunk is a normal document in the
+ * index (source=catalogue, sourceType=catalogue). It surfaces
+ * on its own retrieval merits for broad enumeration questions.
+ * No question-shape detection or intent-driven widening — the
+ * catalogue carries the enumeration payload as a single chunk.
  */
 export async function retrieveContext(
   question: string,
   topK = FINAL_TOP_K
 ): Promise<SearchMatch[]> {
-  // Remove unnecessary whitespace from the question.
+  const result = await retrieveContextCore(question, topK);
+  return result.matches;
+}
+
+/**
+ * Same pipeline as retrieveContext, but also returns the
+ * telemetry struct. Intended for the regression harness so
+ * we can report pool sizes, rerank counts, and approximate
+ * context size per test case. Production callers should
+ * use retrieveContext() instead.
+ */
+export async function retrieveContextWithTelemetry(
+  question: string,
+  topK = FINAL_TOP_K
+): Promise<{ matches: SearchMatch[]; telemetry: RetrievalTelemetry }> {
+  return retrieveContextCore(question, topK);
+}
+
+/**
+ * Shared implementation. Always computes telemetry — the
+ * struct is trivially small so this costs nothing on the
+ * production hot path.
+ */
+async function retrieveContextCore(
+  question: string,
+  topK: number
+): Promise<{ matches: SearchMatch[]; telemetry: RetrievalTelemetry }> {
   const trimmedQuestion = question.trim();
 
   if (!trimmedQuestion) {
-    throw new Error(
-      "Question cannot be empty"
-    );
+    throw new Error("Question cannot be empty");
   }
 
   /**
-   * Rewrite the natural-language question into a concise,
-   * search-oriented query. The rewrite is generic: no
-   * hard-coded project names, employers, or question types.
-   *
-   * Gated by env.queryRewriteEnabled so we can A/B the
-   * pipeline with rewrite on vs off without touching code.
-   * When disabled, the trimmed original question is passed
-   * straight to the BM25 side of hybrid search.
-   *
-   * Examples of the rewrite output:
-   *
-   * "What's Zohaib's current job?"
-   * -> "current employment position role"
-   *
-   * "What was his jailbreak contribution?"
-   * -> "LLM jailbreak detection individual contribution"
+   * Optional LLM query rewrite. Gated by env.queryRewriteEnabled
+   * (currently false by default — see docs/design-decisions.md).
    */
   const searchQuery = env.queryRewriteEnabled
     ? await rewriteQuery(trimmedQuestion)
     : trimmedQuestion;
 
   /**
-   * Generate the semantic embedding from the
-   * complete original question.
-   *
-   * Embedding the original preserves full context that
-   * the rewrite may compress away.
-   *
-   * During development:
-   * Qwen3-Embedding-0.6B -> 1024 dimensions
-   *
-   * During production:
-   * Azure text-embedding-3-small -> 1536 dimensions
+   * Embed the full original question, not the rewrite —
+   * this preserves context the rewrite may have compressed.
    */
-  const queryVector =
-    await createEmbedding(
-      trimmedQuestion
-    );
+  const queryVector = await createEmbedding(trimmedQuestion);
+  const expectedDimensions = getEmbeddingDimensions();
 
-  /**
-   * Ask the currently selected embedding provider
-   * how many dimensions its vector should contain.
-   */
-  const expectedDimensions =
-    getEmbeddingDimensions();
-
-  /**
-   * Protect against accidentally querying an index
-   * with vectors from the wrong embedding model.
-   */
-  if (
-    queryVector.length !==
-    expectedDimensions
-  ) {
+  if (queryVector.length !== expectedDimensions) {
     throw new Error(
       `Expected ${expectedDimensions}-dimensional ` +
       `query embedding, received ${queryVector.length}`
     );
   }
 
-  /**
-   * Stage 1 — Azure AI Search hybrid retrieval.
-   *
-   * We over-fetch a broad candidate pool (CANDIDATE_POOL_SIZE)
-   * so recall stays high even when Azure's own ranking
-   * places the ideal chunk outside the top 5.
-   */
+  // Stage 1 — Azure AI Search hybrid retrieval.
   const candidates = await searchHybrid(
     searchQuery,
     queryVector,
     CANDIDATE_POOL_SIZE
   );
 
-  /**
-   * Stage 2 — LLM reranking.
-   *
-   * The reranker reads the full candidate content and
-   * reorders it by how directly each chunk answers the
-   * original user question. Only the top `topK` chunks
-   * survive to become the grounding context.
-   */
-  return rerank(
+  // Stage 2 — LLM reranking to the requested topK.
+  const ranked = await rerank(
     trimmedQuestion,
     candidates,
     topK
   );
+
+  const approxFinalContextChars = ranked.reduce(
+    (sum, match) => sum + match.content.length + CONTEXT_LABEL_OVERHEAD_CHARS,
+    0
+  );
+
+  const telemetry: RetrievalTelemetry = {
+    poolRequested: CANDIDATE_POOL_SIZE,
+    poolReturned: candidates.length,
+    rerankTopN: topK,
+    rerankReturned: ranked.length,
+    finalCount: ranked.length,
+    approxRerankPromptChars:
+      candidates.length * RERANK_PROMPT_CHARS_PER_CANDIDATE,
+    approxFinalContextChars,
+  };
+
+  return { matches: ranked, telemetry };
 }

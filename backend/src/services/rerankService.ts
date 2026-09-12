@@ -56,6 +56,9 @@ RELEVANCE RULES:
   a project name, or another query term.
 - Do NOT include unrelated team/member information unless the
   question concerns that team or attribution.
+- Treat obvious minor spelling variations or typographical errors as
+  referring to the matching entity when the surrounding evidence makes
+  the intended referent clear.
 - If no candidate meaningfully helps answer the question, return
   an empty array: []
 
@@ -439,16 +442,25 @@ async function rerankWithAzure(
 
     input: userPrompt,
 
-    // A short array of candidate numbers fits comfortably
-    // in 200 tokens even at maximum 20 candidates.
-    max_output_tokens: 200,
+    // Reasoning tokens at `effort: low` share this budget
+    // with the visible JSON output. 200 was fine at `minimal`
+    // but was truncating the JSON array mid-write once we
+    // moved to `low`, causing frequent parse failures and
+    // fallback to the raw pool order. 800 leaves plenty of
+    // headroom for both reasoning and a short array of at
+    // most ~15 numbers.
+    max_output_tokens: 800,
 
-    // Reranking is a constrained selection task — the
-    // model just picks and orders numbers from a fixed
-    // set. `minimal` avoids paying for reasoning tokens
-    // that don't improve the outcome here.
+    // Reranking is mostly a constrained selection task, but
+    // "minimal" reasoning empirically fails on typo-carrying
+    // questions (e.g. "Roshtai" vs Roshtay): the model reads
+    // the strings literally and returns [] even when the pool
+    // contains correct-spelling candidates. `low` gives just
+    // enough reasoning headroom to apply the typo-tolerance
+    // instruction reliably without triggering expensive
+    // deep-think loops.
     reasoning: {
-      effort: "minimal",
+      effort: "low",
     },
   });
 

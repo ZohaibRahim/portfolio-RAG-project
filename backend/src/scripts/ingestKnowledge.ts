@@ -1,11 +1,22 @@
+import fs from "fs";
+import path from "path";
+
 import { loadKnowledgeBase } from "../services/knowledgeLoader.js";
+
+import {
+  buildProjectsCatalogueChunk,
+  CATALOGUE_SOURCE_TYPE,
+} from "../services/catalogueBuilder.js";
 
 import {
   createEmbedding,
   getEmbeddingDimensions,
 } from "../services/embeddingService.js";
 
-import { uploadSearchDocuments } from "../services/searchService.js";
+import {
+  deleteDocumentsBySourceType,
+  uploadSearchDocuments,
+} from "../services/searchService.js";
 
 import { PortfolioSearchDocument } from "../types/PortfolioSearchDocument.js";
 
@@ -88,6 +99,47 @@ async function createEmbeddingWithRetry(
 async function main(): Promise<void> {
   // Load and chunk all six knowledge files.
   const chunks = loadKnowledgeBase();
+
+  // Generate the Projects Catalogue chunk from resume.md.
+  // The catalogue is a compact index (category + project name)
+  // built at ingestion time so broad enumeration queries have a
+  // single document to match against instead of relying on a
+  // long recall path through individual project chunks.
+  const resumeMarkdownPath = path.resolve(
+    process.cwd(),
+    "../knowledge/resume.md"
+  );
+
+  const resumeMarkdown = fs.readFileSync(
+    resumeMarkdownPath,
+    "utf-8"
+  );
+
+  const catalogueChunk = buildProjectsCatalogueChunk(resumeMarkdown);
+
+  console.log(
+    `Generated Projects Catalogue: ${catalogueChunk.content.length} chars, ` +
+    `~${Math.round(catalogueChunk.content.split(/\s+/).length)} words, ` +
+    `~${Math.round(catalogueChunk.content.length / 4)} est. tokens`
+  );
+
+  // Add the catalogue chunk to the ingestion queue.
+  chunks.push(catalogueChunk);
+
+  // Wipe any pre-existing catalogue documents in the target
+  // index before re-uploading. Keeps re-ingestion idempotent
+  // and prevents shape/id changes from leaving orphan rows.
+  console.log(
+    `\nClearing stale catalogue documents in ` +
+    `index "${env.azureSearchIndexName}"...`
+  );
+
+  const deletedCount =
+    await deleteDocumentsBySourceType(CATALOGUE_SOURCE_TYPE);
+
+  console.log(
+    `Deleted ${deletedCount} stale catalogue document(s).`
+  );
 
   // Ask the active provider what vector size it produces.
   //

@@ -15,6 +15,7 @@
     "test:retrieval": "tsx src/scripts/testRetrieval.ts",
     "test:context": "tsx src/scripts/testContext.ts",
     "ingest": "tsx src/scripts/ingestKnowledge.ts",
+    "bootstrap:staging": "tsx src/scripts/bootstrapStagingIndex.ts",
     "test:rag": "tsx src/scripts/testRag.ts",
     "test:citations": "tsx src/scripts/testCitationValidation.ts",
     "test:regression": "tsx src/scripts/testRegression.ts"

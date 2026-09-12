@@ -53,13 +53,10 @@ export async function answerQuestion(
     throw new Error("Question cannot be empty");
   }
 
-  // Retrieve the five most relevant portfolio chunks.
-  // May return fewer than five — or zero — if the reranker
-  // rejected weak or unrelated candidates.
-  const matches = await retrieveContext(
-    trimmedQuestion,
-    5
-  );
+  // Retrieve the top 5 most relevant portfolio chunks. May
+  // return zero if the reranker rejected weak or unrelated
+  // candidates (short-circuit below).
+  const matches = await retrieveContext(trimmedQuestion);
 
   /**
    * Short-circuit when the reranker returned no relevant
