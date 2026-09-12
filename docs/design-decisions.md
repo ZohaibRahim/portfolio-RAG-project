@@ -224,12 +224,37 @@ lowest level that produces correct output for each stage:
 | Stage | Effort | Rationale |
 |---|---|---|
 | Query rewrite | `minimal` | Constrained keyword expansion; deep reasoning adds nothing |
-| Rerank | `minimal` | Constrained selection from a numbered list |
+| Rerank | `low` | Constrained selection *most of the time*, but typo-carrying questions ("Roshtai" vs Roshtay, "PHAS" vs PHSA) empirically fail at `minimal` — the model reads the token mismatch literally and returns `[]` even when the pool contains correctly-spelled evidence. `low` supplies just enough reasoning headroom to apply the typo-tolerance instruction (see below). |
 | Answer generation | `low` | Enough headroom to apply grounding, citation, and formatting rules; not enough to trigger an expensive deep-think loop |
 
-Reasoning tokens count against `max_output_tokens`, so the chat stage's
-cap was bumped from 700 → 1500 to leave room for both reasoning and
-the visible answer.
+**Evidence for rerank at `low`.** A 5x repro against
+`portfolio-chunks-staging` of `"What is Roshtai?"`:
+
+| Config | Pass rate |
+|---|:-:|
+| `effort: minimal`, no typo instruction | 1/5 (baseline variance) |
+| `effort: minimal` + typo-tolerance instruction | 1/5 (unchanged — prompt-only fix didn't help) |
+| **`effort: low` + typo-tolerance instruction** | **5/5** |
+
+The retrieval side was fine throughout — 7 Roshtay chunks appeared in
+the pre-rerank pool on every run. The reranker itself was the failure
+point, and the effort bump was the fix.
+
+The typo-tolerance instruction added to `RERANK_INSTRUCTIONS`:
+
+> Treat obvious minor spelling variations or typographical errors as
+> referring to the matching entity when the surrounding evidence makes
+> the intended referent clear.
+
+Generic on purpose — no project or employer names hardcoded.
+
+**Token-cap consequences.** Reasoning tokens count against
+`max_output_tokens`. Two caps were bumped alongside the effort change:
+
+| Stage | Before | After | Why |
+|---|---:|---:|---|
+| Chat / answer | 700 | 1500 | Reasoning + answer text must both fit |
+| Rerank | 200 | 800 | At `effort: low` the model spent enough reasoning tokens to truncate the JSON array mid-write, causing frequent parse failures and fallback to raw pool order. 800 leaves comfortable headroom for reasoning plus a short array of at most ~15 numbers. |
 
 ---
 
@@ -421,6 +446,159 @@ ranking drift.
 
 **`.env` flipped back to Ollama immediately after the run to stop
 consuming Azure credit during development.**
+
+---
+
+## Projects Catalogue: ingestion-time enumeration payload
+
+**Decision.** Ingest one compact "Projects Catalogue" chunk into the
+Search index alongside the normal source chunks. The catalogue lists
+every portfolio project by canonical name, grouped by category, with
+one preamble sentence. It sits in the index like any other document
+(`source: "catalogue"`, `sourceType: "catalogue"`, `section: "Projects
+Catalogue"`, `id: "catalogue-0"`) and is retrieved through the same
+hybrid + rerank path as everything else.
+
+**Motivation — the retrieval mismatch that widening couldn't fix.** A
+production test on `"What projects has Zohaib done?"` returned only 3
+projects in the answer, with the model correctly noting the portfolio
+contained more that the supplied context didn't list. Diagnosis:
+
+- The question's shape is biographical ("what projects has X done").
+- BM25 and the vector embedding both match it against biographical
+  framing chunks (`Portfolio Site`, `Master Resume`, `Roshtay —
+  Founder`, `Mind Art — Founder`), not against project detail chunks.
+- The project detail chunks describe individual projects; they don't
+  say "these are Zohaib's projects" anywhere in their text. They never
+  entered the candidate pool for a broad enumeration query.
+- Larger top-K couldn't rescue chunks that were never in the pool.
+
+The catalogue is a compact document that *does* say "these are the
+projects, by category" — so it's a strong lexical + semantic match
+for broad enumeration queries, and once it's in the answer context
+the answer LLM can enumerate every project by name.
+
+**Design constraints followed.**
+
+- Generated automatically at ingestion time from resume.md's H2/H3
+  structure. No manually maintained list of project names.
+- Category names (six of them, e.g. "Machine Learning, AI & Data
+  Science") are build-time config in `catalogueBuilder.ts`. Project
+  names are extracted dynamically from `###` headings under those
+  H2s — no project name appears in any TypeScript file.
+- Compact index only. Category + canonical project name per line, no
+  per-project descriptions. Descriptions live in the resume and
+  dedicated project files and are surfaced via the regular retrieval
+  path when a specific project is asked about.
+- Single chunk (`id: "catalogue-0"`) as long as it fits. Splitting per
+  category is a V2 escape hatch only if the catalogue ever grows past
+  the reranker's ~150-word truncation window.
+- The runtime pipeline has no knowledge of the catalogue — no
+  intent detection, no special-case widening, no source-name checks.
+
+**Measured size.** 16 projects across 6 categories → 1,035 chars, 147
+words, ~259 est. tokens. Comfortably inside the reranker's 150-word
+truncation, so the full catalogue reaches the LLM in the rerank prompt
+(not just the head).
+
+**Alternatives considered and rejected.**
+
+| Alternative | Why rejected |
+|---|---|
+| Intent-aware top-K widening at runtime (pool 25 → rerank 15 → dedup 12 for list-shape queries) | Implemented and tested (see below). Adds `intentService.ts`, enumeration constants, a dedup helper, and a `forceMode` scaffolding to production. Costs 66% more rerank input tokens on enumeration queries. Coverage advantage over "catalogue alone" was 2 extra known-project labels in retrieval — but the catalogue body already lists every project name, so the answer LLM enumerates equally well without those extra chunks. |
+| Per-category catalogue chunks (one per H2) | Six chunks compete for top-K slots on broad queries and split the enumeration payload. Any category rename in future creates orphan-doc cleanup risk. Not needed until the catalogue outgrows one chunk. |
+| A separate "enumeration prompt addendum" for the answer LLM (Variant B in the test) | Same retrieval as V1, plus an answer-prompt paragraph telling the LLM to enumerate distinctly and to hedge ("The retrieved portfolio evidence includes..."). Improved consistency and hedging marginally in the A vs B answer comparison, but did **not** materially improve breadth or completeness (both A and B enumerated 16/16 projects and 6/6 categories). Not worth the extra plumbing. |
+
+**Evidence — A/B/C on the staging index.**
+
+Variants tested against `portfolio-chunks-staging` after the catalogue
+was ingested. All three used the same catalogue; they differed only
+in runtime behavior.
+
+| Variant | Runtime | Existing 30 (hard) | Enum 5 (hard) | Rerank tokens for 5 enum cases | Final context tokens |
+|---|---|:-:|:-:|---:|---:|
+| A | catalogue + original 15/5 | 30/30 | 5/5 | ~18,750 | ~4,600 |
+| B | A + list-intent answer addendum | 29/30* | 5/5 | ~18,750 | ~5,000 |
+| C | catalogue + intent-driven 25/15/12 widening | 29/30* | 5/5 | ~31,250 | ~7,200 |
+
+`*` The 29/30 in B and C is baseline GPT-5-mini rerank variance on
+`"Has Zohaib worked with React?"` — retrieval is code-identical to A
+for that query. Not caused by the widening or the prompt addendum.
+
+Head-to-head answer generation on `"What projects has Zohaib done?"`
+and `"What are some of Zohaib's major projects?"` confirmed A produces
+complete enumerations:
+
+| Metric | Variant A | Variant B |
+|---|:-:|:-:|
+| Distinct projects named | **16/16** | **16/16** |
+| Categories covered | **6/6** | **6/6** |
+| Cites the catalogue | ✓ | ✓ |
+| Cites detail chunks where appropriate | ✓ | ✓ |
+| Falsely implies completeness | no | no |
+
+Variant A won: cheapest, simplest, and hits the coverage bar. The
+existing system prompt's `"Use bullet lists when enumerating multiple
+items"` rule is enough to make the model enumerate from the catalogue
+without an explicit list-intent addendum.
+
+**Consequences of choosing A.** These runtime paths were deleted:
+
+- `intentService.ts` (whole file)
+- `ENUMERATION_POOL_SIZE`, `ENUMERATION_RERANK_TOPN`,
+  `ENUMERATION_FINAL_TOP_K` constants
+- `deduplicateBySourceSection` helper
+- `LIST_INTENT_ADDENDUM` and its plumbing through `chatService` and
+  `ragService`
+- `RetrievalOptions`/`forceMode` and the A/B/C test scaffolding
+
+The production retrieval path is now exactly what it was before the
+catalogue landed: pool 15, rerank top 5, no intent branching. The
+catalogue simply exists in the index and competes for top-5 slots on
+its own merit.
+
+**Stale-catalogue cleanup during ingestion.** Before uploading, the
+ingest script calls `deleteDocumentsBySourceType("catalogue")` to
+remove any existing catalogue documents from the target index. This
+makes catalogue re-ingestion a full replace, so a future shape or
+id change cannot leave orphan documents. The stable id (`catalogue-0`)
+means the normal case is a single-document overwrite; the delete is
+insurance for shape drift.
+
+**Tradeoff being accepted.**
+
+- The catalogue chunk is auto-generated content — one extra document
+  in the index. Small (259 tokens) and always retrieved when broad
+  enumeration queries fire, so it acts as a permanent, correct index
+  the answer LLM can enumerate from.
+- Catalogue freshness is now an **ingestion/deployment concern**. If a
+  project is added to `resume.md` and ingestion doesn't re-run, the
+  answer to broad enumeration queries will read as a complete list
+  while missing the new project. Mitigated by treating ingest as a
+  required step in the release process, not runtime intent detection.
+
+---
+
+## Projects Catalogue: staging-first rollout
+
+**Decision.** The catalogue was validated against a dedicated Azure
+Search staging index (`portfolio-chunks-staging`) before ever touching
+`portfolio-chunks`. Schema was cloned from production via
+`SearchIndexClient.getIndex()` + `createIndex()` in the one-shot
+`bootstrap:staging` npm script — same 1536-dim vectors, same fields,
+same HNSW/cosine profile, same semantic and scoring config.
+
+**Why staging.** Ingestion into the production index would re-embed
+every existing chunk (upserting under the same ids) plus add the
+catalogue. That's low-risk mechanically, but it burns Azure OpenAI
+credit and would blur the boundary between "measured before deploy"
+and "deployed". A separate index kept the A/B/C experiment cleanly
+isolated and made re-running trivial.
+
+**Idempotency of the bootstrap.** If `portfolio-chunks-staging`
+already exists, the script prints that fact and exits — no delete,
+no recreate. This keeps repeat invocations safe. Never touches the
+source index in any way beyond a read.
 
 ---
 

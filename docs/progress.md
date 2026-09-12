@@ -16,6 +16,70 @@ current state and what specifically remains.
 
 Newest first. Each entry links to the commit that landed the change.
 
+- **2026-09-12 — Projects Catalogue ingested into `portfolio-chunks`.**
+  Ran `npm run ingest` against production after the working-tree diff
+  was approved. 130 documents in the index (129 source chunks +
+  `catalogue-0`). Verified: `catalogue-0` exists exactly once with
+  `source=catalogue`, `sourceType=catalogue`,
+  `section="Projects Catalogue"`, `chunkIndex=0`, content = 1,035
+  bytes. No ingestion errors. Backend App Service still running the
+  pre-catalogue image — the catalogue is now retrievable in prod but
+  the backend code changes (reranker `effort: low`, `max_output_tokens
+  800`, typo-tolerance instruction, cleanup of enumeration-widening
+  runtime) are not yet deployed.
+
+  React reliability diagnostic run 5x against `portfolio-chunks` under
+  the cleaned architecture: **4/5 PASS**. Every run's pre-rerank pool
+  contained the `portfolio-website | Tech stack` React chunk; the
+  reranker rejected everything once (residual GPT-5-mini variance at
+  `effort: low`). Acceptable per the plan's ≥4/5 threshold — no
+  additional mitigation needed before deploy.
+
+  Enumeration regression metrics fixed: `countExpectedMentions` now
+  searches chunk content (not just labels), so the catalogue body's
+  project names count toward coverage. `minDistinctSections` dropped
+  from the two broad catalogue-backed questions because one catalogue
+  + a few biographical chunks is the intended shape. A new
+  `requiresCatalogueInFinal` check replaces the wider-retrieval
+  incentive for those cases. Category-specific enumeration cases
+  retain `minDistinctSections` + `sectionContainsDominant` where they
+  still measure something meaningful.
+
+- **2026-09-11 — Projects Catalogue + reranker tuning (staging-verified).** An auto-generated Projects Catalogue chunk
+  now ships in the Search index at ingestion time: one compact chunk
+  (~259 tokens, 16 projects across 6 categories) built by
+  `catalogueBuilder.ts` from `resume.md`'s H2/H3 structure — no
+  hardcoded project names. Ingestion also does a stale-catalogue
+  delete (`deleteDocumentsBySourceType`) before uploading, so future
+  shape/id changes can't leave orphan documents. An A/B/C evaluation
+  against a dedicated `portfolio-chunks-staging` index proved that
+  "catalogue + original 15/5 retrieval" produces 16/16 projects and
+  6/6 categories in the answer for broad enumeration questions — no
+  runtime intent detection or enumeration widening needed. All that
+  runtime scaffolding (`intentService.ts`, enumeration constants,
+  `deduplicateBySourceSection`, `LIST_INTENT_ADDENDUM`,
+  `RetrievalOptions`/`forceMode`) was deleted. See design decisions
+  → "Projects Catalogue: ingestion-time enumeration payload" for the
+  full evidence table and alternatives considered.
+
+  Reranker fix landed alongside: after 4/5 failures on
+  `"What is Roshtai?"` (typo query), a Roshtai 5x diagnostic proved
+  retrieval was fine (7 Roshtay chunks in every pre-rerank pool) and
+  the reranker itself was rejecting them at `effort: minimal`. A
+  prompt-only typo-tolerance instruction did not help on its own;
+  bumping `reasoning.effort` to `low` with `max_output_tokens` raised
+  from 200 → 800 (reasoning tokens share the budget) restored 5/5.
+  Design doc's reasoning-effort table updated.
+
+  Staging bootstrap: new one-shot `npm run bootstrap:staging` script
+  clones `portfolio-chunks` schema to `portfolio-chunks-staging` via
+  `SearchIndexClient.getIndex()` + `createIndex()`. Idempotent —
+  no-op if the target already exists.
+
+  As of this entry, production was untouched. Prod ingest occurred
+  the following day (see 2026-09-12 entry above); backend redeploy
+  still pending.
+
 - **2026-09-09 — Query rewrite disabled by default.** Ran the
   30-question regression suite with `QUERY_REWRITE_ENABLED` both `true`
   and `false`. Both configurations produced 30/30 hard passes and 1
@@ -148,12 +212,15 @@ Each item lists the file(s) or command that prove the state.
 
 ### 15. Production rewrite / rerank strategy decided
 - Decision captured in `docs/design-decisions.md` under "Production-only:
-  reasoning effort per stage":
+  reasoning effort per stage". Current state (updated 2026-09-11 —
+  see the Post-snapshot updates section above):
   - Query rewrite → `reasoning.effort: minimal`
-  - Rerank → `reasoning.effort: minimal`
+  - Rerank → `reasoning.effort: low` (was `minimal`; bumped after the
+    Roshtai 5x diagnostic)
   - Answer generation → `reasoning.effort: low`
-- `max_output_tokens` bumped from 700 → 1500 to leave room for reasoning
-  tokens.
+- `max_output_tokens` bumped: chat 700 → 1500, rerank 200 → 800 (needed
+  when rerank moved to `low` so reasoning tokens don't truncate the
+  JSON array).
 
 ### 20. Basic abuse / cost protection (partial-complete — enough for V1)
 - Rate limit ✅

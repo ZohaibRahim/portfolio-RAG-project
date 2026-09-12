@@ -153,6 +153,27 @@ index's expected dimensionality (1024 for the Ollama-dev index, 1536
 for the Azure production index). This prevents the classic RAG bug of
 querying an index with vectors from the wrong model.
 
+### The Projects Catalogue chunk
+
+The Search index contains one auto-generated **Projects Catalogue**
+document alongside the normal source chunks. It's a compact index —
+category headings from `resume.md` (Machine Learning / AI / Data
+Science, Analytics & BI, Full-Stack, Database, Digital Transformation,
+Networking & Security) plus every project's canonical name pulled from
+that section's H3 headings. ~150 words, ~260 tokens.
+
+The catalogue is stored with `source: "catalogue"`, `sourceType:
+"catalogue"`, `section: "Projects Catalogue"`, `id: "catalogue-0"`.
+It's retrieved through the same hybrid + rerank path as everything
+else — no runtime intent detection, no special-case widening. Broad
+enumeration queries ("what projects has X done", "list X's data
+projects") match the catalogue naturally and get a compact document
+the answer LLM can enumerate from cleanly.
+
+Details, alternatives considered, and the A/B/C evaluation that
+justified this shape live in
+[`docs/design-decisions.md`](docs/design-decisions.md).
+
 ### Reranking
 
 The 15 candidates first pass through a deterministic regex blocklist
@@ -171,6 +192,15 @@ pre-filter, this cut the rerank prompt by roughly 78% versus a naive
 implementation that sent all 20 full-length candidates.
 
 The reranker keeps the top 5 chunks as the final grounding context.
+
+**Typo tolerance.** The rerank instructions include a generic clause
+telling the model to treat obvious minor spelling variations as
+referring to the correctly-spelled entity when the surrounding evidence
+is clear ("Roshtai" → Roshtay, "PHAS" → PHSA). No project or employer
+names are hardcoded — the instruction is shape-based. On Azure, this
+pairs with `reasoning.effort: "low"` on the rerank call (up from
+`minimal`) which is what actually enables the model to apply the
+instruction reliably.
 
 ### Unsupported-question rejection
 
@@ -221,8 +251,10 @@ Runs entirely locally against free open models:
 - Search index: `portfolio-chunks` (same Azure Search service)
 
 Per-stage `reasoning.effort` is tuned to the smallest value that
-produces correct output — `minimal` for query rewrite and rerank,
-`low` for answer generation — to minimise Azure token spend.
+produces correct output — `minimal` for query rewrite, `low` for
+rerank and answer generation — to minimise Azure token spend. See
+`docs/design-decisions.md` for the Roshtai 5x diagnostic that
+justified the rerank effort bump.
 
 Switching environments is a single `.env` edit:
 
@@ -298,12 +330,28 @@ one per project or document (`resume.md`, `roshtay.md`,
 1. Loads and normalises each Markdown file.
 2. Chunks each document into ~350-word passages with 50-word overlap,
    preserving section headings.
-3. Generates an embedding per chunk with the active provider.
-4. Uploads the chunk + embedding + metadata (`source`, `section`,
-   `chunkIndex`) to the Azure AI Search index.
+3. Generates an auto-derived **Projects Catalogue** chunk from
+   `resume.md`'s H2/H3 structure (see the retrieval-pipeline section
+   above). One compact chunk, deterministic id `catalogue-0`.
+4. Deletes any existing documents where `sourceType eq 'catalogue'`
+   in the target index so re-ingestion is a full replace for the
+   catalogue — shape or id changes can't leave orphan documents.
+5. Generates an embedding per chunk with the active provider.
+6. Uploads the chunk + embedding + metadata (`source`, `sourceType`,
+   `section`, `chunkIndex`) to the Azure AI Search index.
 
 Re-running the script is idempotent; updated knowledge is picked up on
-the next ingestion pass.
+the next ingestion pass. Because catalogue freshness now depends on
+ingestion, adding a new project to `resume.md` requires re-running
+`npm run ingest` before the broad enumeration answers reflect it.
+
+### Staging index bootstrap
+
+For safe experimentation, `npm run bootstrap:staging` clones the
+production Search index schema into `portfolio-chunks-staging`. It's
+idempotent — no-op if the target already exists — and never modifies
+the source index. Useful before any change that would reshape the
+catalogue or the ingestion pipeline.
 
 ---
 
